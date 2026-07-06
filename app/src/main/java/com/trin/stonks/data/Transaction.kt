@@ -11,5 +11,7 @@ data class Transaction(
     val paymentType: String = "Cash",
     val receiptUrl: String? = null,
     val timestamp: Long = System.currentTimeMillis(),
-    val batchId: String = ""
+    val batchId: String = "",
+    val note: String = "",
+    val affectsStock: Boolean = false
 )

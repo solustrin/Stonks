@@ -1,8 +1,11 @@
 package com.trin.stonks.data
 
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.FirebaseFirestoreSettings
-import com.google.firebase.firestore.PersistentCacheSettings
+import com.google.firebase.firestore.*
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.tasks.await
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import retrofit2.Retrofit
@@ -11,185 +14,165 @@ import retrofit2.http.Multipart
 import retrofit2.http.POST
 import retrofit2.http.Part
 import retrofit2.http.Query
-import kotlinx.coroutines.channels.awaitClose
-import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.callbackFlow
-import okhttp3.MediaType.Companion.toMediaType
 
-// ImgBB API interface (no album parameter)
 interface ImgBBService {
     @Multipart
     @POST("1/upload")
-    suspend fun uploadImage(
-        @Query("key") apiKey: String,
-        @Part image: MultipartBody.Part
-    ): ImgBBResponse
+    suspend fun uploadImage(@Query("key") apiKey: String, @Part image: MultipartBody.Part): ImgBBResponse
 }
 
 data class ImgBBResponse(val data: ImgBBData)
 data class ImgBBData(val url: String)
+data class Workspace(val id: String = "", val name: String = "")
 
-data class Workspace(
-    val id: String = "",
-    val name: String = ""
-)
-
-class CloudRepository {
-    private val db = FirebaseFirestore.getInstance()
-
-    // Your ImgBB API key
-    private val MY_IMGBB_KEY = "e3b006ac252210fe03d3829a30ebeefb"
-
+class CloudRepository(
+    private val db: FirebaseFirestore,
+    private val imgbbKey: String
+) {
     private val imgBBService = Retrofit.Builder()
         .baseUrl("https://api.imgbb.com/")
         .addConverterFactory(GsonConverterFactory.create())
         .build()
         .create(ImgBBService::class.java)
 
+    var currentWorkspaceId: String = "default"
+
     init {
         val settings = FirebaseFirestoreSettings.Builder()
-            .setLocalCacheSettings(
-                PersistentCacheSettings.newBuilder()
-                    .setSizeBytes(104857600L)
-                    .build()
-            )
+            .setLocalCacheSettings(PersistentCacheSettings.newBuilder().setSizeBytes(104857600L).build())
             .build()
         db.firestoreSettings = settings
     }
 
-    var currentWorkspaceId: String = "default"
-
     private fun workspaceRef() = db.collection("workspaces").document(currentWorkspaceId)
     private fun transactionsRef() = workspaceRef().collection("transactions")
+    private fun inventoryRef() = workspaceRef().collection("inventory")
     private fun profilesRef() = workspaceRef().collection("profiles")
     private fun paymentTypesRef() = workspaceRef().collection("paymentTypes")
 
-    // --- Workspace management ---
+    // --- Workspace ---
     fun getWorkspacesFlow(): Flow<List<Workspace>> = callbackFlow {
-        val subscription = db.collection("workspaces")
-            .addSnapshotListener { snapshot, error ->
-                if (error != null) { close(error); return@addSnapshotListener }
-                val list = snapshot?.documents?.mapNotNull { doc ->
-                    Workspace(id = doc.id, name = doc.getString("name") ?: "Unnamed")
-                } ?: emptyList()
-                trySend(list)
-            }
-        awaitClose { subscription.remove() }
+        val sub = db.collection("workspaces").addSnapshotListener { snap, _ ->
+            trySend(snap?.documents?.map { Workspace(it.id, it.getString("name") ?: "Unnamed") } ?: emptyList())
+        }
+        awaitClose { sub.remove() }
     }
 
-    fun createWorkspace(name: String) {
-        val doc = db.collection("workspaces").document()
-        doc.set(mapOf("name" to name))
-    }
+    fun createWorkspace(name: String) = db.collection("workspaces").document().set(mapOf("name" to name))
+    fun deleteWorkspace(id: String) = db.collection("workspaces").document(id).delete()
+    fun updateWorkspaceName(wId: String, name: String) = db.collection("workspaces").document(wId).update("name", name)
 
-    fun deleteWorkspace(id: String) {
-        db.collection("workspaces").document(id).delete()
-    }
-
-    fun updateWorkspaceName(workspaceId: String, newName: String) {
-        db.collection("workspaces").document(workspaceId).update("name", newName)
-    }
-
-    // --- Upload receipt to ImgBB (no album) ---
     suspend fun uploadReceipt(imageBytes: ByteArray): String? {
         return try {
-            val requestFile = imageBytes.toRequestBody("image/jpeg".toMediaType())
-            val body = MultipartBody.Part.createFormData("image", "receipt.jpg", requestFile)
-            val response = imgBBService.uploadImage(MY_IMGBB_KEY, body)
-            response.data.url
-        } catch (e: Exception) {
-            e.printStackTrace()
-            null
-        }
-    }
-
-    // --- Transactions ---
-    fun getAllTransactions(): Flow<List<Transaction>> = callbackFlow {
-        val subscription = transactionsRef()
-            .orderBy("timestamp", com.google.firebase.firestore.Query.Direction.DESCENDING)
-            .addSnapshotListener { snapshot, _ ->
-                if (snapshot != null) {
-                    val transactions = snapshot.documents.mapNotNull { doc ->
-                        val type = doc.getString("type") ?: return@mapNotNull null
-                        val itemName = doc.getString("itemName") ?: ""
-                        val amount = doc.getDouble("amount") ?: 0.0
-                        val quantity = (doc.getLong("quantity") ?: 1L).toInt()
-                        val unitPrice = doc.getDouble("unitPrice") ?: amount
-                        val createdBy = doc.getString("createdBy") ?: "Anonymous"
-                        val paymentType = doc.getString("paymentType") ?: "Cash"
-                        val receiptUrl = doc.getString("receiptUrl")
-                        val timestamp = doc.getLong("timestamp") ?: 0L
-                        val batchId = doc.getString("batchId") ?: ""
-
-                        Transaction(
-                            id = doc.id, type = type, itemName = itemName, amount = amount,
-                            quantity = quantity, unitPrice = unitPrice, createdBy = createdBy,
-                            paymentType = paymentType, receiptUrl = receiptUrl,
-                            timestamp = timestamp, batchId = batchId
-                        )
-                    }
-                    trySend(transactions)
-                }
-            }
-        awaitClose { subscription.remove() }
-    }
-
-    fun insert(transaction: Transaction) {
-        val data = hashMapOf(
-            "type" to transaction.type, "itemName" to transaction.itemName,
-            "amount" to transaction.amount, "quantity" to transaction.quantity,
-            "unitPrice" to transaction.unitPrice, "createdBy" to transaction.createdBy,
-            "paymentType" to transaction.paymentType, "receiptUrl" to transaction.receiptUrl,
-            "timestamp" to transaction.timestamp, "batchId" to transaction.batchId
-        )
-        transactionsRef().add(data)
-    }
-
-    fun delete(transactionId: String) {
-        transactionsRef().document(transactionId).delete()
+            val body = MultipartBody.Part.createFormData("image", "receipt.jpg", imageBytes.toRequestBody("image/jpeg".toMediaType()))
+            imgBBService.uploadImage(imgbbKey, body).data.url
+        } catch (e: Exception) { null }
     }
 
     fun update(
-        id: String, type: String, itemName: String, amount: Double,
-        quantity: Int, unitPrice: Double, createdBy: String, paymentType: String, batchId: String
+        id: String,
+        type: String,
+        name: String,
+        amt: Double,
+        qty: Int,
+        up: Double,
+        cb: String,
+        pt: String,
+        bid: String,
+        note: String,
+        receiptUrl: String? = null
     ) {
-        val updatedData = mapOf(
-            "type" to type, "itemName" to itemName, "amount" to amount,
-            "quantity" to quantity, "unitPrice" to unitPrice, "createdBy" to createdBy,
-            "paymentType" to paymentType, "batchId" to batchId
+        val updates = mutableMapOf<String, Any>(
+            "type" to type,
+            "itemName" to name,
+            "amount" to amt,
+            "quantity" to qty,
+            "unitPrice" to up,
+            "createdBy" to cb,
+            "paymentType" to pt,
+            "batchId" to bid,
+            "note" to note
         )
-        transactionsRef().document(id).update(updatedData)
+        receiptUrl?.let { updates["receiptUrl"] = it }
+        transactionsRef().document(id).update(updates)
     }
 
-    // --- Profiles ---
+    fun updateInventoryItem(id: String, name: String, price: Double, stock: Int) {
+        inventoryRef().document(id).update(
+            mapOf(
+                "name" to name,
+                "defaultPrice" to price,
+                "currentStock" to stock
+            )
+        )
+    }
+
+    fun getAllTransactions(): Flow<List<Transaction>> = callbackFlow {
+        val sub = transactionsRef()
+            .orderBy("timestamp", com.google.firebase.firestore.Query.Direction.DESCENDING)
+            .addSnapshotListener { snap, _ ->
+                if (snap != null) {
+                    trySend(snap.documents.map { doc ->
+                        Transaction(
+                            doc.id, doc.getString("type") ?: "SALE", doc.getString("itemName") ?: "",
+                            doc.getDouble("amount") ?: 0.0, (doc.getLong("quantity") ?: 1L).toInt(),
+                            doc.getDouble("unitPrice") ?: 0.0, doc.getString("createdBy") ?: "Anonymous",
+                            doc.getString("paymentType") ?: "Cash", doc.getString("receiptUrl"),
+                            doc.getLong("timestamp") ?: 0L, doc.getString("batchId") ?: "",
+                            doc.getString("note") ?: "", doc.getBoolean("affectsStock") ?: false
+                        )
+                    })
+                }
+            }
+        awaitClose { sub.remove() }
+    }
+
+    fun insert(t: Transaction) = transactionsRef().add(t)
+    fun delete(id: String) = transactionsRef().document(id).delete()
+
+    fun getInventoryFlow(): Flow<List<InventoryItem>> = callbackFlow {
+        val sub = inventoryRef().orderBy("name").addSnapshotListener { snap, _ ->
+            if (snap != null) {
+                trySend(snap.documents.map { InventoryItem(it.id, it.getString("name") ?: "", it.getDouble("defaultPrice") ?: 0.0, it.getLong("currentStock")?.toInt() ?: 0) })
+            }
+        }
+        awaitClose { sub.remove() }
+    }
+
+    suspend fun upsertInventoryItem(name: String, price: Double) {
+        val snap = inventoryRef().whereEqualTo("name", name).get().await()
+        if (snap.isEmpty) {
+            inventoryRef().add(mapOf("name" to name, "defaultPrice" to price, "currentStock" to 0))
+        } else {
+            val doc = snap.documents.first()
+            doc.reference.update("defaultPrice", price)
+        }
+    }
+
+    suspend fun getInventoryItemIdByName(name: String): String? {
+        val snap = inventoryRef().whereEqualTo("name", name).get().await()
+        return snap.documents.firstOrNull()?.id
+    }
+
+    fun adjustStock(itemId: String, adjustment: Int) = inventoryRef().document(itemId).update("currentStock", FieldValue.increment(adjustment.toLong()))
+    fun addInventoryItem(name: String, price: Double, stock: Int) = inventoryRef().add(mapOf("name" to name, "defaultPrice" to price, "currentStock" to stock))
+    fun deleteInventoryItem(id: String) = inventoryRef().document(id).delete()
+
     fun getProfiles(): Flow<List<String>> = callbackFlow {
-        val subscription = profilesRef()
-            .orderBy("name")
-            .addSnapshotListener { snapshot, _ ->
-                if (snapshot != null) {
-                    val profiles = snapshot.documents.mapNotNull { it.getString("name") }
-                    trySend(if (profiles.isEmpty()) listOf("Guest") else profiles)
-                }
-            }
-        awaitClose { subscription.remove() }
+        val sub = profilesRef().orderBy("name").addSnapshotListener { snap, _ ->
+            trySend(snap?.documents?.mapNotNull { it.getString("name") } ?: emptyList())
+        }
+        awaitClose { sub.remove() }
     }
+    fun addProfile(name: String) = profilesRef().document(name).set(mapOf("name" to name))
+    fun deleteProfile(name: String) = profilesRef().document(name).delete()
 
-    fun addProfile(name: String) { profilesRef().document(name).set(mapOf("name" to name)) }
-    fun deleteProfile(name: String) { profilesRef().document(name).delete() }
-
-    // --- Payment Types ---
     fun getPaymentTypes(): Flow<List<String>> = callbackFlow {
-        val subscription = paymentTypesRef()
-            .orderBy("name")
-            .addSnapshotListener { snapshot, _ ->
-                if (snapshot != null) {
-                    val types = snapshot.documents.mapNotNull { it.getString("name") }
-                    trySend(if (types.isEmpty()) listOf("Cash") else types)
-                }
-            }
-        awaitClose { subscription.remove() }
+        val sub = paymentTypesRef().orderBy("name").addSnapshotListener { snap, _ ->
+            trySend(snap?.documents?.mapNotNull { it.getString("name") } ?: emptyList())
+        }
+        awaitClose { sub.remove() }
     }
-
-    fun addPaymentType(name: String) { paymentTypesRef().document(name).set(mapOf("name" to name)) }
-    fun deletePaymentType(name: String) { paymentTypesRef().document(name).delete() }
+    fun addPaymentType(name: String) = paymentTypesRef().document(name).set(mapOf("name" to name))
+    fun deletePaymentType(name: String) = paymentTypesRef().document(name).delete()
 }
