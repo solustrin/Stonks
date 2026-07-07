@@ -24,7 +24,9 @@ object PdfUtils {
         clientContact: String,
         notes: String,
         items: List<Triple<String, Int, Double>>,
-        shareMode: Boolean // <-- NEW PARAMETER
+        discount: Double = 0.0,    // NEW parameter
+        taxPercent: Double = 0.0,  // NEW parameter
+        shareMode: Boolean
     ) {
         val pdfDocument = PdfDocument()
         val pageInfo = PdfDocument.PageInfo.Builder(595, 842, 1).create()
@@ -41,6 +43,7 @@ object PdfUtils {
         val rightAlignText = Paint(textPaint).apply { textAlign = Paint.Align.RIGHT }
         val rightAlignHeader = Paint(headerPaint).apply { textAlign = Paint.Align.RIGHT }
         val rightAlignBold = Paint(boldTextPaint).apply { textAlign = Paint.Align.RIGHT }
+        val redTextPaint = Paint(textPaint).apply { textAlign = Paint.Align.RIGHT; color = Color.parseColor("#D32F2F") } // For Discounts
 
         var yPos = 60f
         val leftMargin = 50f
@@ -103,10 +106,10 @@ object PdfUtils {
         yPos += 25f
 
         // --- TABLE ITEMS ---
-        var totalAmount = 0.0
+        var subtotal = 0.0
         items.forEach { (name, qty, price) ->
             val lineTotal = qty * price
-            totalAmount += lineTotal
+            subtotal += lineTotal
 
             canvas.drawText(name, leftMargin + 8f, yPos, textPaint)
             canvas.drawText(qty.toString(), 360f, yPos, rightAlignText)
@@ -118,22 +121,48 @@ object PdfUtils {
             yPos += 18f
         }
 
-        // --- TOTALS ---
+        // --- TOTALS & ADJUSTMENTS ---
+        val postDiscountTotal = Math.max(0.0, subtotal - discount)
+        val taxAmountCalc = postDiscountTotal * (taxPercent / 100.0)
+        val finalTotalDue = postDiscountTotal + taxAmountCalc
+
         yPos += 10f
-        canvas.drawText("Subtotal:", 450f, yPos, rightAlignHeader)
-        canvas.drawText("RM ${"%.2f".format(totalAmount)}", rightMargin - 8f, yPos, rightAlignText)
-        yPos += 25f
+        val totalsLabelX = 410f
+
+        // Only show Subtotal if there are adjustments
+        if (discount > 0 || taxPercent > 0) {
+            canvas.drawText("Subtotal:", totalsLabelX, yPos, rightAlignHeader)
+            // Use the 'subtotal' variable calculated above, not 'totalAmount'
+            canvas.drawText("RM ${"%.2f".format(subtotal)}", rightMargin - 8f, yPos, rightAlignText)
+            yPos += 18f
+        }
+
+        // Discount Line
+        if (discount > 0) {
+            val redTextPaint = Paint(textPaint).apply { textAlign = Paint.Align.RIGHT; color = Color.parseColor("#D32F2F") }
+            canvas.drawText("Discount:", totalsLabelX, yPos, rightAlignHeader)
+            canvas.drawText("- RM ${"%.2f".format(discount)}", rightMargin - 8f, yPos, redTextPaint)
+            yPos += 18f
+        }
+
+        // Tax Line
+        if (taxPercent > 0) {
+            canvas.drawText("Tax ($taxPercent%):", totalsLabelX, yPos, rightAlignHeader)
+            canvas.drawText("+ RM ${"%.2f".format(taxAmountCalc)}", rightMargin - 8f, yPos, rightAlignText)
+            yPos += 18f
+        }
 
         val totalLabelPaint = Paint(headerPaint).apply { textSize = 16f; textAlign = Paint.Align.RIGHT }
         val totalValuePaint = Paint(titlePaint).apply { textSize = 16f; textAlign = Paint.Align.RIGHT }
 
-        canvas.drawText("Total Due:", 450f, yPos, totalLabelPaint)
-        canvas.drawText("RM ${"%.2f".format(totalAmount)}", rightMargin - 8f, yPos, totalValuePaint)
+        canvas.drawText("Total Due:", totalsLabelX, yPos, totalLabelPaint)
+        // Typo fixed here!
+        canvas.drawText("RM ${"%.2f".format(finalTotalDue)}", rightMargin - 8f, yPos, totalValuePaint)
 
         // --- NOTES & FOOTER ---
         if (notes.isNotBlank()) {
             yPos += 50f
-            canvas.drawText("Notes / Terms:", leftMargin, yPos, headerPaint)
+            canvas.drawText("Notes:", leftMargin, yPos, headerPaint)
             yPos += 15f
             notes.split("\n").forEach { line ->
                 canvas.drawText(line.trim(), leftMargin, yPos, textPaint)

@@ -1,5 +1,8 @@
 package com.trin.stonks.data
 
+import com.google.firebase.firestore.FirebaseFirestore
+import com.google.firebase.firestore.firestore
+import com.google.firebase.Firebase
 import com.google.firebase.firestore.*
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -154,6 +157,44 @@ class CloudRepository(
         return snap.documents.firstOrNull()?.id
     }
 
+    // Add inside CloudRepository.kt
+    suspend fun saveInvoiceToCloud(workspaceId: String, invoice: CloudInvoice) {
+        // Ensure the path is explicitly: "workspaces" (coll) -> workspaceId (doc) -> "invoices" (coll) -> invoiceNumber (doc)
+        db.collection("workspaces")
+            .document(workspaceId)
+            .collection("invoices")
+            .document(invoice.invoiceNumber)
+            .set(invoice)
+            .await()
+    }
+
+    suspend fun deleteCloudInvoice(workspaceId: String, invoiceNumber: String) {
+        db.collection("workspaces")
+            .document(workspaceId)
+            .collection("invoices")
+            .document(invoiceNumber)
+            .delete()
+            .await()
+    }
+
+    suspend fun getCloudInvoices(workspaceId: String): List<CloudInvoice> {
+        return try {
+            val snapshot = db.collection("workspaces")
+                .document(workspaceId)
+                .collection("invoices")
+                .orderBy("timestamp", com.google.firebase.firestore.Query.Direction.DESCENDING)
+                .get()
+                .await()
+
+            val invoices = snapshot.toObjects(CloudInvoice::class.java)
+            android.util.Log.d("StonksDebug", "Fetched ${invoices.size} invoices") // Check Logcat!
+            invoices
+        } catch (e: Exception) {
+            android.util.Log.e("StonksDebug", "Error: ${e.message}")
+            emptyList()
+        }
+    }
+
     fun adjustStock(itemId: String, adjustment: Int) = inventoryRef().document(itemId).update("currentStock", FieldValue.increment(adjustment.toLong()))
     fun addInventoryItem(name: String, price: Double, stock: Int) = inventoryRef().add(mapOf("name" to name, "defaultPrice" to price, "currentStock" to stock))
     fun deleteInventoryItem(id: String) = inventoryRef().document(id).delete()
@@ -176,3 +217,4 @@ class CloudRepository(
     fun addPaymentType(name: String) = paymentTypesRef().document(name).set(mapOf("name" to name))
     fun deletePaymentType(name: String) = paymentTypesRef().document(name).delete()
 }
+
