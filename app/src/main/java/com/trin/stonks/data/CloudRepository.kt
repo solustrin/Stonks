@@ -1,8 +1,5 @@
 package com.trin.stonks.data
 
-import com.google.firebase.firestore.FirebaseFirestore
-import com.google.firebase.firestore.firestore
-import com.google.firebase.Firebase
 import com.google.firebase.firestore.*
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -52,6 +49,8 @@ class CloudRepository(
     private fun inventoryRef() = workspaceRef().collection("inventory")
     private fun profilesRef() = workspaceRef().collection("profiles")
     private fun paymentTypesRef() = workspaceRef().collection("paymentTypes")
+    private fun metadataRef() = workspaceRef().collection("metadata").document("counter")
+
 
     // --- Workspace ---
     fun getWorkspacesFlow(): Flow<List<Workspace>> = callbackFlow {
@@ -110,6 +109,103 @@ class CloudRepository(
         )
     }
 
+    // Just reads the counter to show on the screen (does not increase it)
+    suspend fun peekNextInvoiceNumber(): Int {
+        return try {
+            val snap = metadataRef().get().await()
+            val current = snap.getLong("lastInvoiceNumber") ?: 0L
+            (current + 1).toInt()
+        } catch (e: Exception) {
+            1
+        }
+    }
+
+    // Locks in the number and increases it in the database when saving
+    suspend fun getAndIncrementInvoiceNumber(): Int {
+        return try {
+            db.runTransaction<Int> { transaction ->
+                val snap = transaction.get(metadataRef())
+                val current = snap.getLong("lastInvoiceNumber") ?: 0L
+                val next = current + 1
+
+                transaction.set(metadataRef(), mapOf("lastInvoiceNumber" to next))
+
+                next.toInt()
+            }.await()
+        } catch (e: Exception) {
+            1
+        }
+    }
+
+    // ============================================================
+    // INVOICES (Cloud sync)
+    // ============================================================
+    suspend fun saveInvoiceToCloud(invoice: CloudInvoice) {
+        db.collection("workspaces")
+            .document(currentWorkspaceId)
+            .collection("invoices")
+            .document(invoice.invoiceNumber)
+            .set(invoice)
+            .await()
+    }
+
+    suspend fun deleteCloudInvoice(invoiceNumber: String) {
+        db.collection("workspaces")
+            .document(currentWorkspaceId)
+            .collection("invoices")
+            .document(invoiceNumber)
+            .delete()
+            .await()
+    }
+
+    fun getCloudInvoicesFlow(): Flow<List<CloudInvoice>> = callbackFlow {
+        val sub = db.collection("workspaces")
+            .document(currentWorkspaceId)
+            .collection("invoices")
+            .orderBy("timestamp", com.google.firebase.firestore.Query.Direction.DESCENDING)
+            .addSnapshotListener { snap, _ ->
+                if (snap != null) {
+                    trySend(snap.documents.mapNotNull { it.toObject(CloudInvoice::class.java) })
+                }
+            }
+        awaitClose { sub.remove() }
+    }
+
+    // ============================================================
+    // CLIENTS (Cloud sync)
+    // ============================================================
+    private fun clientsRef() = workspaceRef().collection("clients")
+
+    fun getClientsFlow(): Flow<List<SavedClient>> = callbackFlow {
+        val sub = clientsRef().orderBy("name").addSnapshotListener { snap, _ ->
+            trySend(snap?.documents?.mapNotNull {
+                it.toObject(SavedClient::class.java)?.copy(id = it.id)
+            } ?: emptyList())
+        }
+        awaitClose { sub.remove() }
+    }
+
+    suspend fun saveClientToCloud(client: SavedClient) {
+        val docRef = if (client.id.isNotBlank()) {
+            clientsRef().document(client.id)
+        } else {
+            clientsRef().document()
+        }
+        val data = mapOf(
+            "name" to client.name,
+            "contact" to client.contact,
+            "address" to client.address
+        )
+        docRef.set(data).await()
+    }
+
+    suspend fun deleteClientFromCloud(clientId: String) {
+        clientsRef().document(clientId).delete().await()
+    }
+
+    // ============================================================
+    // TRANSACTIONS & INVENTORY (unchanged)
+    // ============================================================
     fun getAllTransactions(): Flow<List<Transaction>> = callbackFlow {
         val sub = transactionsRef()
             .orderBy("timestamp", com.google.firebase.firestore.Query.Direction.DESCENDING)
@@ -157,44 +253,6 @@ class CloudRepository(
         return snap.documents.firstOrNull()?.id
     }
 
-    // Add inside CloudRepository.kt
-    suspend fun saveInvoiceToCloud(workspaceId: String, invoice: CloudInvoice) {
-        // Ensure the path is explicitly: "workspaces" (coll) -> workspaceId (doc) -> "invoices" (coll) -> invoiceNumber (doc)
-        db.collection("workspaces")
-            .document(workspaceId)
-            .collection("invoices")
-            .document(invoice.invoiceNumber)
-            .set(invoice)
-            .await()
-    }
-
-    suspend fun deleteCloudInvoice(workspaceId: String, invoiceNumber: String) {
-        db.collection("workspaces")
-            .document(workspaceId)
-            .collection("invoices")
-            .document(invoiceNumber)
-            .delete()
-            .await()
-    }
-
-    suspend fun getCloudInvoices(workspaceId: String): List<CloudInvoice> {
-        return try {
-            val snapshot = db.collection("workspaces")
-                .document(workspaceId)
-                .collection("invoices")
-                .orderBy("timestamp", com.google.firebase.firestore.Query.Direction.DESCENDING)
-                .get()
-                .await()
-
-            val invoices = snapshot.toObjects(CloudInvoice::class.java)
-            android.util.Log.d("StonksDebug", "Fetched ${invoices.size} invoices") // Check Logcat!
-            invoices
-        } catch (e: Exception) {
-            android.util.Log.e("StonksDebug", "Error: ${e.message}")
-            emptyList()
-        }
-    }
-
     fun adjustStock(itemId: String, adjustment: Int) = inventoryRef().document(itemId).update("currentStock", FieldValue.increment(adjustment.toLong()))
     fun addInventoryItem(name: String, price: Double, stock: Int) = inventoryRef().add(mapOf("name" to name, "defaultPrice" to price, "currentStock" to stock))
     fun deleteInventoryItem(id: String) = inventoryRef().document(id).delete()
@@ -217,4 +275,3 @@ class CloudRepository(
     fun addPaymentType(name: String) = paymentTypesRef().document(name).set(mapOf("name" to name))
     fun deletePaymentType(name: String) = paymentTypesRef().document(name).delete()
 }
-

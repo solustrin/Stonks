@@ -2,7 +2,12 @@ package com.trin.stonks.data
 
 import android.content.SharedPreferences
 
-data class SavedClient(val id: String, val name: String, val contact: String, val address: String)
+data class SavedClient(
+    val id: String = "",
+    val name: String = "",
+    val contact: String = "",
+    val address: String = ""
+)
 
 data class InvoiceHistory(val invoiceNumber: String, val timestamp: Long, val clientName: String, val total: Double)
 

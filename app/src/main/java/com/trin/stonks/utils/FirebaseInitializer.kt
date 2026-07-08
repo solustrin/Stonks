@@ -10,6 +10,18 @@ object FirebaseInitializer {
     private const val APP_NAME = "userApp"
 
     fun initializeFirebase(context: Context, config: FirebaseConfig): FirebaseFirestore {
+        // If the app is already initialized, just return the existing instance
+        val existingApp = try {
+            FirebaseApp.getInstance(APP_NAME)
+        } catch (e: Exception) {
+            null
+        }
+
+        if (existingApp != null) {
+            return FirebaseFirestore.getInstance(existingApp)
+        }
+
+        // Only initialize if it doesn't exist
         val options = FirebaseOptions.Builder()
             .setProjectId(config.projectId)
             .setApplicationId(config.appId)
@@ -18,16 +30,15 @@ object FirebaseInitializer {
             .setStorageBucket(config.storageBucket ?: "${config.projectId}.appspot.com")
             .build()
 
-        try {
-            FirebaseApp.initializeApp(context, options, APP_NAME)
-        } catch (e: IllegalStateException) {
-            // already initialized
-        }
-        val app = FirebaseApp.getInstance(APP_NAME)
+        val app = FirebaseApp.initializeApp(context, options, APP_NAME)
         return FirebaseFirestore.getInstance(app)
     }
 
     fun getFirestore(): FirebaseFirestore {
-        return FirebaseFirestore.getInstance(FirebaseApp.getInstance(APP_NAME))
+        return try {
+            FirebaseFirestore.getInstance(FirebaseApp.getInstance(APP_NAME))
+        } catch (e: Exception) {
+            FirebaseFirestore.getInstance()
+        }
     }
 }

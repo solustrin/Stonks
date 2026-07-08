@@ -11,10 +11,14 @@ data class InventoryStats(val item: InventoryItem, val totalRevenue: Double, val
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class AccountingViewModel(private val repository: CloudRepository) : ViewModel() {
-    private val _cloudInvoices = MutableStateFlow<List<CloudInvoice>>(emptyList())
-    val cloudInvoices: StateFlow<List<CloudInvoice>> = _cloudInvoices.asStateFlow()
     private val _currentWorkspaceId = MutableStateFlow("default")
     val currentWorkspaceId: StateFlow<String> = _currentWorkspaceId
+    val cloudInvoices: StateFlow<List<CloudInvoice>> = _currentWorkspaceId.flatMapLatest { id ->
+        repository.currentWorkspaceId = id
+        repository.getCloudInvoicesFlow()
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+    suspend fun peekNextInvoiceNumber(): Int = repository.peekNextInvoiceNumber()
+    suspend fun getAndIncrementInvoiceNumber(): Int = repository.getAndIncrementInvoiceNumber()
 
     val workspaces: StateFlow<List<Workspace>> = repository.getWorkspacesFlow().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
 
@@ -134,34 +138,22 @@ class AccountingViewModel(private val repository: CloudRepository) : ViewModel()
         }
     }
 
-    fun fetchCloudInvoices() {
-        viewModelScope.launch {
-            val currentId = _currentWorkspaceId.value
-            if (currentId.isNotEmpty()) {
-                _cloudInvoices.value = repository.getCloudInvoices(currentId)
-            }
-        }
-    }
-
     fun saveCloudInvoice(invoice: CloudInvoice) {
         viewModelScope.launch {
-            val currentId = _currentWorkspaceId.value
-            if (currentId.isNotBlank()) { // Make sure this isn't empty!
-                repository.saveInvoiceToCloud(currentId, invoice)
-                fetchCloudInvoices()
-            } else {
-                // Log an error if currentId is blank!
-                android.util.Log.e("StonksError", "Workspace ID is empty, cannot save invoice")
+            try {
+                repository.saveInvoiceToCloud(invoice)
+            } catch (e: Exception) {
+                android.util.Log.e("StonksError", "Failed to save invoice: ${e.message}")
             }
         }
     }
 
     fun deleteCloudInvoice(invoiceNumber: String) {
         viewModelScope.launch {
-            val currentId = _currentWorkspaceId.value
-            if (currentId.isNotEmpty()) {
-                repository.deleteCloudInvoice(currentId, invoiceNumber)
-                fetchCloudInvoices() // Refresh list
+            try {
+                repository.deleteCloudInvoice(invoiceNumber)
+            } catch (e: Exception) {
+                android.util.Log.e("StonksError", "Failed to delete invoice: ${e.message}")
             }
         }
     }
@@ -197,6 +189,35 @@ class AccountingViewModel(private val repository: CloudRepository) : ViewModel()
         }
         return entries.sortedBy { it.minTimestamp }
             .map { Triple(it.label, it.total, it.count) }
+    }
+
+    private val _clients = MutableStateFlow<List<SavedClient>>(emptyList())
+    val clients: StateFlow<List<SavedClient>> = _clients.asStateFlow()
+
+    fun fetchClients() {
+        viewModelScope.launch {
+            repository.getClientsFlow().collect { list ->
+                _clients.value = list
+            }
+        }
+    }
+
+    suspend fun saveClient(client: SavedClient) {
+        try {
+            repository.saveClientToCloud(client)
+            fetchClients() // Refresh
+        } catch (e: Exception) {
+            android.util.Log.e("StonksError", "Failed to save client: ${e.message}")
+        }
+    }
+
+    suspend fun deleteClient(clientId: String) {
+        try {
+            repository.deleteClientFromCloud(clientId)
+            fetchClients() // Refresh
+        } catch (e: Exception) {
+            android.util.Log.e("StonksError", "Failed to delete client: ${e.message}")
+        }
     }
 
     fun setWorkspace(id: String) { _currentWorkspaceId.value = id }

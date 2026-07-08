@@ -2,6 +2,7 @@ package com.trin.stonks
 
 import android.app.Activity
 import android.content.Context
+import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -44,6 +45,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -159,6 +161,7 @@ import com.trin.stonks.data.CloudInvoiceItem
 import com.trin.stonks.data.CloudRepository
 import com.trin.stonks.data.InventoryItem
 import com.trin.stonks.data.InventoryStats
+import com.trin.stonks.data.FirebaseConfig
 import com.trin.stonks.data.LocalDataHelper
 import com.trin.stonks.data.SavedClient
 import com.trin.stonks.data.Transaction
@@ -177,6 +180,7 @@ import java.util.Calendar
 import java.util.Date
 import java.util.Locale
 import kotlin.math.roundToInt
+import androidx.compose.material.icons.filled.Description
 
 fun createCameraUri(context: Context): Uri {
     val folder = File(context.cacheDir, "camera_images").apply { mkdirs() }
@@ -205,13 +209,9 @@ class MainActivity : ComponentActivity() {
             var workspaceSelected by remember { mutableStateOf(false) }
             var rememberWorkspace by remember { mutableStateOf(prefs.getBoolean("remember_workspace", true)) }
 
+// In MainActivity.kt, inside setContent { ... }
             StonksTheme(darkTheme = isDarkTheme) {
-                // 1. ADD THE SURFACE HERE! Wrap EVERYTHING inside it.
-                // This ensures the "empty space" during an animation matches your dark/light theme.
-                Surface(
-                    modifier = Modifier.fillMaxSize(),
-                    color = MaterialTheme.colorScheme.background
-                ) {
+                Surface(modifier = Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
                     if (showSplash) {
                         StonksSplashScreen(onAnimationFinished = { showSplash = false })
                     } else {
@@ -221,15 +221,16 @@ class MainActivity : ComponentActivity() {
                             label = "app_flow"
                         ) { configured ->
                             if (!configured) {
-                                // Removed the inner Surface here since we have a global one now
                                 SetupScreen(
                                     onSetupComplete = { isConfigured = true },
-                                    onError = { /* handle error */ }
+                                    onError = { android.util.Log.e("SetupError", it) }
                                 )
                             } else {
+                                // --- CONFIG IS DEFINED HERE ---
                                 val config = ConfigManager.getConfig(this@MainActivity)
                                 val imgbbKey = ConfigManager.getImgbbKey(this@MainActivity)
 
+                                // --- CONFIG IS USED HERE (Inside the same block) ---
                                 if (config != null && imgbbKey != null) {
                                     val firestore = FirebaseInitializer.initializeFirebase(this@MainActivity, config)
                                     val repository = CloudRepository(firestore, imgbbKey)
@@ -278,13 +279,14 @@ class MainActivity : ComponentActivity() {
                                         }
                                     }
                                 } else {
+                                    // Config file exists but is corrupted/empty
                                     ConfigManager.clearConfig(this@MainActivity)
                                     isConfigured = false
                                 }
                             }
                         }
                     }
-                } // End of Surface
+                }
             }
         }
     }
@@ -496,6 +498,7 @@ class MainActivity : ComponentActivity() {
         var currentScreen by remember { mutableStateOf(StonksScreen.Dashboard) }
         var showAddDialog by remember { mutableStateOf(false) }
         val inventoryList by viewModel.inventory.collectAsState()
+        var prefillForInvoice by remember { mutableStateOf<List<Transaction>?>(null) }
 
         val profiles by viewModel.profiles.collectAsState()
         val paymentTypes by viewModel.paymentTypes.collectAsState()
@@ -691,7 +694,11 @@ class MainActivity : ComponentActivity() {
                                     )
 
                                     StonksScreen.History -> TransactionHistoryScreen(
-                                        viewModel, profiles, paymentTypes, snackbarHostState, scope
+                                        viewModel, profiles, paymentTypes, snackbarHostState, scope,
+                                        onCreateInvoice = { txs ->
+                                            prefillForInvoice = txs
+                                            currentScreen = StonksScreen.Invoice // Jump to invoice screen!
+                                        }
                                     )
 
                                     StonksScreen.Invoice -> InvoiceMakerScreen(
@@ -699,9 +706,9 @@ class MainActivity : ComponentActivity() {
                                         viewModel = viewModel,
                                         snackbarHostState = snackbarHostState,
                                         scope = scope,
-                                        onEditInvoice = { invoice ->
-                                            editTargetInvoice = invoice
-                                        }
+                                        onEditInvoice = { invoice -> editTargetInvoice = invoice },
+                                        prefillTransactions = prefillForInvoice,
+                                        onPrefillConsumed = { prefillForInvoice = null } // Reset after loading
                                     )
 
                                     StonksScreen.Calculator -> CalculatorScreen()
@@ -1210,7 +1217,8 @@ class MainActivity : ComponentActivity() {
         profiles: List<String>,
         paymentTypes: List<String>,
         snackbarHostState: SnackbarHostState,
-        scope: CoroutineScope
+        scope: CoroutineScope,
+        onCreateInvoice: (List<Transaction>) -> Unit // <--- ADD THIS
     ) {
         val transactions by viewModel.allTransactions.collectAsState()
         var transactionToDelete by remember { mutableStateOf<Transaction?>(null) }
@@ -1386,12 +1394,16 @@ class MainActivity : ComponentActivity() {
                         TransactionCard(
                             tx = tx,
                             onEdit = { transactionToEdit = tx },
-                            onDelete = { transactionToDelete = tx })
+                            onDelete = { transactionToDelete = tx },
+                            onCreateInvoice = { onCreateInvoice(listOf(tx)) } // <--- ADD THIS
+                        )
                     } else {
                         GroupedTransactionCard(
                             group = group,
                             onEditItem = { transactionToEdit = it },
-                            onDeleteItem = { transactionToDelete = it })
+                            onDeleteItem = { transactionToDelete = it },
+                            onCreateInvoice = { onCreateInvoice(group) } // <--- ADD THIS
+                        )
                     }
                 }
             }
@@ -1528,18 +1540,25 @@ class MainActivity : ComponentActivity() {
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(
-                                "Disconnect from Firebase",
+                                "Disconnect from DB",
                                 modifier = Modifier.weight(1f),
                                 color = MaterialTheme.colorScheme.error
                             )
+                            // Inside your SettingsScreen or where you handle database logic
                             Button(
                                 onClick = {
+                                    // 1. Clear the stored config
                                     ConfigManager.clearConfig(context)
-                                    (context as? Activity)?.recreate()
+
+                                    // 2. Restart the activity to trigger the SetupScreen flow again
+                                    val intent = context.packageManager.getLaunchIntentForPackage(context.packageName)
+                                    intent?.addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_NEW_TASK)
+                                    context.startActivity(intent)
+                                    (context as? Activity)?.finish()
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
                             ) {
-                                Text("Disconnect")
+                                Text("Confirm")
                             }
                         }
                     }
@@ -2511,7 +2530,8 @@ class MainActivity : ComponentActivity() {
         tx: Transaction,
         showActions: Boolean = true,
         onEdit: () -> Unit,
-        onDelete: () -> Unit
+        onDelete: () -> Unit,
+        onCreateInvoice: (() -> Unit)? = null
     ) {
         var showReceiptViewer by remember { mutableStateOf(false) }
         var showFullNote by remember { mutableStateOf(false) }
@@ -2599,6 +2619,12 @@ class MainActivity : ComponentActivity() {
                             }
                         }
                         if (showActions) {
+                            // --- NEW INVOICE SHORTCUT ---
+                            if (onCreateInvoice != null && tx.type == "SALE") {
+                                IconButton(onClick = onCreateInvoice, modifier = Modifier.size(32.dp)) {
+                                    Icon(Icons.Default.Description, contentDescription = "Create Invoice", modifier = Modifier.size(16.dp), tint = MaterialTheme.colorScheme.primary)
+                                }
+                            }
                             IconButton(onClick = onEdit, modifier = Modifier.size(32.dp)) {
                                 Icon(
                                     Icons.Default.Edit,
@@ -2653,7 +2679,8 @@ class MainActivity : ComponentActivity() {
         group: List<Transaction>,
         showActions: Boolean = true,
         onEditItem: (Transaction) -> Unit,
-        onDeleteItem: (Transaction) -> Unit
+        onDeleteItem: (Transaction) -> Unit,
+        onCreateInvoice: (() -> Unit)? = null
     ) {
         val first = group.first()
         val totalAmount = group.sumOf { it.amount }
@@ -2699,16 +2726,29 @@ class MainActivity : ComponentActivity() {
                     }
                     Column(horizontalAlignment = Alignment.End) {
                         Text(
-                            text = "${if (type == "SALE") "+" else "-"} RM ${
-                                "%.2f".format(
-                                    totalAmount
-                                )
-                            }",
+                            text = "${if (type == "SALE") "+" else "-"} RM ${"%.2f".format(totalAmount)}",
                             fontWeight = FontWeight.Bold,
                             color = if (type == "SALE") Color(0xFF388E3C) else Color(0xFFD32F2F),
                             fontSize = 16.sp
                         )
-                        if (first.receiptUrl != null) {
+                        Row(modifier = Modifier.padding(top = 4.dp)) {
+                            // --- NEW INVOICE SHORTCUT ---
+                            if (onCreateInvoice != null && type == "SALE") {
+                                IconButton(
+                                    onClick = onCreateInvoice,
+                                    modifier = Modifier.size(32.dp)
+                                ) {
+                                    Icon(
+                                        Icons.Default.Description,
+                                        contentDescription = "Create Invoice",
+                                        modifier = Modifier.size(16.dp),
+                                        tint = MaterialTheme.colorScheme.primary
+                                    )
+                                }
+                            }
+                        }
+
+                            if (first.receiptUrl != null) { // Existing receipt button...
                             IconButton(onClick = {
                                 selectedReceiptUrl = first.receiptUrl; showReceiptViewer = true
                             }, modifier = Modifier.size(32.dp).padding(top = 4.dp)) {
@@ -3206,21 +3246,17 @@ class MainActivity : ComponentActivity() {
         viewModel: AccountingViewModel,
         snackbarHostState: SnackbarHostState,
         scope: CoroutineScope,
-        onEditInvoice: (CloudInvoice) -> Unit
+        onEditInvoice: (CloudInvoice) -> Unit,
+        prefillTransactions: List<Transaction>? = null, // <--- ADD THIS
+        onPrefillConsumed: () -> Unit = {}
     ) {
         val context = LocalContext.current
         val prefs = context.getSharedPreferences("stonks_settings", Context.MODE_PRIVATE)
         val focusManager = androidx.compose.ui.platform.LocalFocusManager.current
 
-        LaunchedEffect(Unit) {
-            viewModel.fetchCloudInvoices()
-        }
 
         var selectedTab by remember { mutableStateOf(0) }
         val tabs = listOf("Create Invoice", "History & Clients")
-
-        val cloudInvoices by viewModel.cloudInvoices.collectAsState()
-        var savedClients by remember { mutableStateOf(LocalDataHelper.getClients(prefs)) }
 
         // State for editing a client
         var editingClient by remember { mutableStateOf<SavedClient?>(null) }
@@ -3245,11 +3281,35 @@ class MainActivity : ComponentActivity() {
         var adjustmentsExpanded by remember { mutableStateOf(false) }
         var notesExpanded by remember { mutableStateOf(false) }
 
-        val currentInvoiceId = prefs.getInt("last_invoice_id", 1)
-        val invoiceNumber by remember(currentInvoiceId) { mutableStateOf("INV-${String.format("%04d", currentInvoiceId)}") }
+        val cloudInvoices by viewModel.cloudInvoices.collectAsState()
+
+        // 1. USE CLOUD CLIENTS INSTEAD OF LOCAL
+        val savedClients by viewModel.clients.collectAsState()
+
+        var invoiceNumber by remember { mutableStateOf("INV-0000") }
+        var isGenerating by remember { mutableStateOf(true) }
+
+        // 2. FETCH CLIENTS AND PEEK THE ID WHEN SCREEN OPENS
+        LaunchedEffect(Unit) {
+            viewModel.fetchClients()
+            val next = viewModel.peekNextInvoiceNumber()
+            invoiceNumber = "INV-${String.format("%04d", next)}"
+            isGenerating = false
+        }
 
         data class InvoiceItem(var name: String, var quantity: String, var unitPrice: String, var expanded: Boolean = false)
         val items = remember { mutableStateListOf(InvoiceItem("", "1", "")) }
+
+        LaunchedEffect(prefillTransactions) {
+            if (prefillTransactions != null) {
+                selectedTab = 0 // Switch to Create Invoice tab
+                items.clear()
+                prefillTransactions.forEach { tx ->
+                    items.add(InvoiceItem(tx.itemName, tx.quantity.toString(), tx.unitPrice.toString(), false))
+                }
+                onPrefillConsumed() // Clear the queue so it doesn't loop
+            }
+        }
 
         val subtotal = items.sumOf { (it.quantity.toIntOrNull() ?: 0) * (it.unitPrice.toDoubleOrNull() ?: 0.0) }
         val discountAmount = discountInput.toDoubleOrNull() ?: 0.0
@@ -3270,48 +3330,63 @@ class MainActivity : ComponentActivity() {
                 scope.launch { snackbarHostState.showSnackbar("Client Name and at least one item are required") }
                 return
             }
-            try {
-                prefs.edit().putString("sender_name", senderName).putString("sender_contact", senderContact).apply()
 
-                PdfUtils.generateAndShareInvoice(
-                    context = context,
-                    invoiceNumber = invoiceNumber,
-                    senderName = senderName.trim(),
-                    senderContact = senderContact.trim(),
-                    clientName = clientName.trim(),
-                    clientAddress = clientAddress.trim(),
-                    clientContact = clientContact.trim(),
-                    notes = notes.trim(),
-                    items = validItems,
-                    discount = discountAmount,
-                    taxPercent = taxPercentage,
-                    shareMode = shareMode
-                )
+            // 3. LOCK IN THE ID ONLY IF WE ARE SAVING TO CLOUD
+            scope.launch {
+                try {
+                    prefs.edit().putString("sender_name", senderName).putString("sender_contact", senderContact).apply()
 
-                if (shareMode) {
-                    val cloudItems = validItems.map { CloudInvoiceItem(it.first, it.second, it.third) }
-                    val newInvoice = CloudInvoice(
-                        invoiceNumber = invoiceNumber,
-                        timestamp = System.currentTimeMillis(),
+                    val finalInvoiceNumber = if (shareMode) {
+                        val next = viewModel.getAndIncrementInvoiceNumber()
+                        "INV-${String.format("%04d", next)}"
+                    } else {
+                        invoiceNumber
+                    }
+
+                    PdfUtils.generateAndShareInvoice(
+                        context = context,
+                        invoiceNumber = finalInvoiceNumber,
                         senderName = senderName.trim(),
                         senderContact = senderContact.trim(),
                         clientName = clientName.trim(),
                         clientAddress = clientAddress.trim(),
                         clientContact = clientContact.trim(),
                         notes = notes.trim(),
+                        items = validItems,
                         discount = discountAmount,
                         taxPercent = taxPercentage,
-                        totalDue = finalTotalDue,
-                        items = cloudItems
+                        shareMode = shareMode
                     )
-                    viewModel.saveCloudInvoice(newInvoice)
-                    validItems.forEach { (soldName, soldQty, _) ->
-                        inventoryList.find { it.name.equals(soldName, ignoreCase = true) }
-                            ?.let { viewModel.deductStock(it.id, soldQty) }
-                    }
-                    prefs.edit().putInt("last_invoice_id", currentInvoiceId + 1).apply()
-                    scope.launch { snackbarHostState.showSnackbar("Invoice synced to cloud & stock updated!") }
-                    scope.launch {
+
+                    if (shareMode) {
+                        val cloudItems = validItems.map { CloudInvoiceItem(it.first, it.second, it.third) }
+                        val newInvoice = CloudInvoice(
+                            invoiceNumber = finalInvoiceNumber,
+                            timestamp = System.currentTimeMillis(),
+                            senderName = senderName.trim(),
+                            senderContact = senderContact.trim(),
+                            clientName = clientName.trim(),
+                            clientAddress = clientAddress.trim(),
+                            clientContact = clientContact.trim(),
+                            notes = notes.trim(),
+                            discount = discountAmount,
+                            taxPercent = taxPercentage,
+                            totalDue = finalTotalDue,
+                            items = cloudItems
+                        )
+                        viewModel.saveCloudInvoice(newInvoice)
+
+                        validItems.forEach { (soldName, soldQty, _) ->
+                            inventoryList.find { it.name.equals(soldName, ignoreCase = true) }
+                                ?.let { viewModel.deductStock(it.id, soldQty) }
+                        }
+
+                        // Update UI for the next invoice immediately
+                        val peekNext = viewModel.peekNextInvoiceNumber()
+                        invoiceNumber = "INV-${String.format("%04d", peekNext)}"
+
+                        snackbarHostState.showSnackbar("Invoice synced to cloud & stock updated!")
+
                         kotlinx.coroutines.delay(500)
                         clientName = ""
                         clientAddress = ""
@@ -3321,9 +3396,9 @@ class MainActivity : ComponentActivity() {
                         items.clear()
                         items.add(InvoiceItem("", "1", ""))
                     }
+                } catch (e: Exception) {
+                    snackbarHostState.showSnackbar("Error: ${e.localizedMessage}")
                 }
-            } catch (e: Exception) {
-                scope.launch { snackbarHostState.showSnackbar("Error: ${e.localizedMessage}") }
             }
         }
 
@@ -3470,17 +3545,17 @@ class MainActivity : ComponentActivity() {
                                 TextButton(
                                     onClick = {
                                         if (clientName.isNotBlank()) {
-                                            LocalDataHelper.saveClient(
-                                                prefs,
-                                                SavedClient(
-                                                    java.util.UUID.randomUUID().toString(),
-                                                    clientName.trim(),
-                                                    clientContact.trim(),
-                                                    clientAddress.trim()
+                                            scope.launch {
+                                                viewModel.saveClient(
+                                                    SavedClient(
+                                                        java.util.UUID.randomUUID().toString(),
+                                                        clientName.trim(),
+                                                        clientContact.trim(),
+                                                        clientAddress.trim()
+                                                    )
                                                 )
-                                            )
-                                            savedClients = LocalDataHelper.getClients(prefs)
-                                            scope.launch { snackbarHostState.showSnackbar("Client saved locally!") }
+                                                snackbarHostState.showSnackbar("Client saved to Cloud!")
+                                            }
                                         }
                                     },
                                     modifier = Modifier.padding(top = 4.dp)
@@ -3757,8 +3832,7 @@ class MainActivity : ComponentActivity() {
                                     Icon(Icons.Default.Edit, null)
                                 }
                                 IconButton(onClick = {
-                                    LocalDataHelper.deleteClient(prefs, client.id)
-                                    savedClients = LocalDataHelper.getClients(prefs)
+                                    scope.launch { viewModel.deleteClient(client.id) }
                                 }) {
                                     Icon(Icons.Default.Delete, null, tint = MaterialTheme.colorScheme.error)
                                 }
@@ -3805,12 +3879,11 @@ class MainActivity : ComponentActivity() {
                                 contact = editClientContact.trim(),
                                 address = editClientAddress.trim()
                             )
-                            // Update in local storage
-                            LocalDataHelper.deleteClient(prefs, editingClient!!.id)
-                            LocalDataHelper.saveClient(prefs, updatedClient)
-                            savedClients = LocalDataHelper.getClients(prefs)
-                            editingClient = null
-                            scope.launch { snackbarHostState.showSnackbar("Client updated") }
+                            scope.launch {
+                                viewModel.saveClient(updatedClient)
+                                editingClient = null
+                                snackbarHostState.showSnackbar("Client updated in Cloud")
+                            }
                         }
                     }) {
                         Text("Save")
@@ -4169,9 +4242,6 @@ class MainActivity : ComponentActivity() {
         )
     }
 
-    // ============================================================
-// NEW CALCULATOR COMPOSABLE
-// ============================================================
     @Composable
     fun CalculatorScreen() {
         var input by remember { mutableStateOf("0") }
@@ -4179,72 +4249,34 @@ class MainActivity : ComponentActivity() {
         var operator by remember { mutableStateOf("") }
         var isNewOperand by remember { mutableStateOf(true) }
 
+        // Logic to handle math
         fun onAction(action: String) {
-            when (action) {
-                "C" -> {
-                    input = "0"
-                    previousInput = ""
-                    operator = ""
-                    isNewOperand = true
-                }
-
-                "⌫" -> {
-                    if (input.length > 1) input = input.dropLast(1)
-                    else input = "0"
-                }
-
-                "+", "-", "×", "÷" -> {
-                    if (operator.isNotEmpty() && !isNewOperand) {
-                        val val1 = previousInput.toDoubleOrNull() ?: 0.0
-                        val val2 = input.toDoubleOrNull() ?: 0.0
-                        val res = when (operator) {
-                            "+" -> val1 + val2
-                            "-" -> val1 - val2
-                            "×" -> val1 * val2
-                            "÷" -> if (val2 != 0.0) val1 / val2 else 0.0
-                            else -> 0.0
-                        }
-                        input = if (res % 1.0 == 0.0) res.toLong().toString() else res.toString()
-                    }
+            when {
+                action == "C" -> { input = "0"; previousInput = ""; operator = ""; isNewOperand = true }
+                action == "⌫" -> { if (input.length > 1) input = input.dropLast(1) else input = "0" }
+                action in listOf("+", "-", "×", "÷") -> {
                     previousInput = input
                     operator = action
                     isNewOperand = true
                 }
-
-                "=" -> {
-                    if (operator.isNotEmpty()) {
-                        val val1 = previousInput.toDoubleOrNull() ?: 0.0
-                        val val2 = input.toDoubleOrNull() ?: 0.0
-                        val res = when (operator) {
-                            "+" -> val1 + val2
-                            "-" -> val1 - val2
-                            "×" -> val1 * val2
-                            "÷" -> if (val2 != 0.0) val1 / val2 else 0.0
-                            else -> 0.0
-                        }
-                        input = if (res % 1.0 == 0.0) res.toLong().toString() else res.toString()
-                        operator = ""
-                        previousInput = ""
-                        isNewOperand = true
+                action == "=" -> {
+                    val num1 = previousInput.toDoubleOrNull() ?: 0.0
+                    val num2 = input.toDoubleOrNull() ?: 0.0
+                    input = when (operator) {
+                        "+" -> (num1 + num2).toString()
+                        "-" -> (num1 - num2).toString()
+                        "×" -> (num1 * num2).toString()
+                        "÷" -> if (num2 != 0.0) (num1 / num2).toString() else "Error"
+                        else -> input
                     }
+                    previousInput = ""
+                    operator = ""
+                    isNewOperand = true
                 }
-
-                "." -> {
-                    if (isNewOperand) {
-                        input = "0."
-                        isNewOperand = false
-                    } else if (!input.contains(".")) {
-                        input += "."
-                    }
-                }
-
-                else -> {
-                    if (isNewOperand) {
-                        input = action
-                        isNewOperand = false
-                    } else {
-                        if (input == "0") input = action else input += action
-                    }
+                action == "." -> if (!input.contains(".")) input += "."
+                else -> { // Numbers
+                    if (isNewOperand) { input = action; isNewOperand = false }
+                    else input += action
                 }
             }
         }
@@ -4257,84 +4289,58 @@ class MainActivity : ComponentActivity() {
             listOf("0", ".", "=")
         )
 
-        Column(
-            modifier = Modifier.fillMaxSize().padding(16.dp),
-            verticalArrangement = Arrangement.Bottom
+        Box(
+            modifier = Modifier.fillMaxSize(),
+            contentAlignment = Alignment.Center
         ) {
-            Text(
-                text = previousInput + if (operator.isNotEmpty()) " $operator" else "",
-                style = MaterialTheme.typography.headlineSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.fillMaxWidth().padding(end = 16.dp),
-                textAlign = TextAlign.End
-            )
-            Text(
-                text = input,
-                style = MaterialTheme.typography.displayLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.fillMaxWidth().padding(end = 16.dp, bottom = 32.dp),
-                textAlign = TextAlign.End,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth(0.9f)
+                    .widthIn(max = 400.dp)
+                    .padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                // Display Area
+                Column(modifier = Modifier.fillMaxWidth().padding(bottom = 16.dp), horizontalAlignment = Alignment.End) {
+                    Text(text = "$previousInput $operator", style = MaterialTheme.typography.bodyLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text(text = input, style = MaterialTheme.typography.displayMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurface)
+                }
 
-            buttons.forEach { row ->
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(vertical = 4.dp),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    row.forEach { btn ->
-                        Button(
-                            onClick = {
-                                if (btn == "%") {
-                                    val current = input.toDoubleOrNull() ?: 0.0
-                                    input = (current / 100.0).toString()
-                                } else {
-                                    onAction(btn)
-                                }
-                            },
-                            modifier = Modifier
-                                .weight(if (btn == "0") 2f else 1f)
-                                .aspectRatio(if (btn == "0") 2f else 1f),
-                            shape = RoundedCornerShape(24.dp),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = when {
-                                    btn in listOf(
-                                        "÷",
-                                        "×",
-                                        "-",
-                                        "+",
-                                        "="
-                                    ) -> MaterialTheme.colorScheme.primary
-
-                                    btn in listOf(
-                                        "C",
-                                        "⌫",
-                                        "%"
-                                    ) -> MaterialTheme.colorScheme.secondaryContainer
-
-                                    else -> MaterialTheme.colorScheme.surfaceVariant
+                // Buttons
+                buttons.forEach { row ->
+                    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        row.forEach { btn ->
+                            Button(
+                                onClick = {
+                                    if (btn == "%") {
+                                        val current = input.toDoubleOrNull() ?: 0.0
+                                        input = (current / 100.0).toString()
+                                    } else {
+                                        onAction(btn)
+                                    }
                                 },
-                                contentColor = when {
-                                    btn in listOf(
-                                        "÷",
-                                        "×",
-                                        "-",
-                                        "+",
-                                        "="
-                                    ) -> MaterialTheme.colorScheme.onPrimary
-
-                                    btn in listOf(
-                                        "C",
-                                        "⌫",
-                                        "%"
-                                    ) -> MaterialTheme.colorScheme.onSecondaryContainer
-
-                                    else -> MaterialTheme.colorScheme.onSurface
+                                modifier = Modifier
+                                    .weight(if (btn == "0") 2f else 1f)
+                                    .height(64.dp),
+                                contentPadding = PaddingValues(0.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = when {
+                                        btn == "=" -> MaterialTheme.colorScheme.primary
+                                        btn in listOf("÷", "×", "-", "+") -> MaterialTheme.colorScheme.secondary
+                                        else -> MaterialTheme.colorScheme.surfaceVariant
+                                    },
+                                    contentColor = when {
+                                        btn == "=" -> MaterialTheme.colorScheme.onPrimary
+                                        btn in listOf("÷", "×", "-", "+") -> MaterialTheme.colorScheme.onSecondary
+                                        else -> MaterialTheme.colorScheme.onSurface
+                                    }
+                                )
+                            ) {
+                                Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxSize()) {
+                                    Text(text = btn, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                                 }
-                            )
-                        ) {
-                            Text(text = btn, fontSize = 28.sp)
+                            }
                         }
                     }
                 }

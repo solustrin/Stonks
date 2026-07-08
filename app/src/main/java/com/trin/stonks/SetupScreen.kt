@@ -25,6 +25,7 @@ import androidx.compose.ui.unit.sp
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import android.net.Uri
+import com.google.firebase.FirebaseApp
 
 // ============================================================
 // STONKS ANIMATED LOADING SCREEN
@@ -95,7 +96,7 @@ fun StonksLoadingAnimation() {
         }
         Spacer(modifier = Modifier.height(24.dp))
         Text(
-            "Connecting to Stonks...",
+            "Connecting to your database...",
             fontSize = 18.sp,
             fontWeight = FontWeight.Bold,
             color = MaterialTheme.colorScheme.primary
@@ -147,17 +148,24 @@ fun SetupScreen(
             val config = com.trin.stonks.utils.JsonParser.parseGoogleServicesJson(json)
                 ?: throw Exception("Invalid google-services.json format")
 
+            // 1. Initialize temporarily to test the connection
             val firestore = com.trin.stonks.utils.FirebaseInitializer.initializeFirebase(context, config)
-            com.trin.stonks.utils.ConfigManager.saveConfig(context, config, imgbbKey)
 
+            // 2. Test the connection BEFORE saving the config
             firestore.collection("test").limit(1).get()
                 .addOnSuccessListener {
+                    // 3. ONLY save config if the connection is successful
+                    com.trin.stonks.utils.ConfigManager.saveConfig(context, config, imgbbKey)
+
                     isProcessing = false
                     onSetupComplete()
                 }
                 .addOnFailureListener { e ->
                     isProcessing = false
-                    onError("Firebase connection failed: ${e.message}")
+                    // ADD THIS LOG:
+                    val projectId = FirebaseApp.getInstance("userApp").options.projectId
+                    android.util.Log.e("SetupError", "Failed for project: $projectId. Error: ${e.message}")
+                    onError("Firebase error ($projectId): ${e.message}")
                 }
         } catch (e: Exception) {
             isProcessing = false
